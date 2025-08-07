@@ -4,15 +4,11 @@ import torch.optim as optim
 import numpy as np
 import matplotlib.pyplot as plt
 import hessian_spectrum
-import json
 import torch.nn.functional as F
-import seaborn as sns
 
 
 from torchvision import datasets, transforms
 from torch.optim.lr_scheduler import CosineAnnealingLR
-import os
-from PIL import Image
 
 # MNIST Network
 class Net(nn.Module):
@@ -160,11 +156,55 @@ if loss_type == 'CE':
 elif loss_type == 'MSE':
     criterion = nn.MSELoss()  # Mean Squared Error Loss
 
+# Epochs at which to compute the Hessian (typically during LR decay)
+hessian_epochs = [int(n_epochs * 0.5), n_epochs - 1]
+
+# Sample a fixed mini-batch for Hessian computation
+train_data = []
+for batch_idx, (data, target) in enumerate(train_loader):
+    if batch_idx >= n_batch_for_hessian:
+        break
+    if loss_type == 'CE':
+        train_data.append({'X_train': data.to(device), 'Y_train': target.to(device)})
+    elif loss_type == 'MSE':
+        target_one_hot = F.one_hot(target, num_classes=n_class).float()
+        train_data.append({'X_train': data.to(device), 'Y_train': target_one_hot.to(device)})
+
+
+def compute_and_plot_hessian(epoch):
+    hessian = hessian_spectrum.Hessian(
+        model,
+        train_data=train_data,
+        batch_size=1,
+        use_minibatch=False,
+        gradient_accumulation_steps=1,
+        device='cpu',
+        comment=f'{comment}_epoch{epoch}',
+        loss=criterion,
+    )
+
+    full_hessian = np.abs(hessian.get_full_hessian())
+    max_value = np.max(full_hessian)
+    plt.figure()
+    plt.imshow(
+        full_hessian,
+        cmap=cmap,
+        interpolation='nearest',
+        vmax=max_value / visual_degree_full_hessian,
+        vmin=0,
+    )
+    plt.colorbar()
+    plt.savefig(f'figure_mnist/{comment}_fullhessian_epoch{epoch}.png')
+    plt.close()
+
 
 # train and test
 loss_list = []
 for epoch in range(n_epochs):
-    loss_list.extend(train(model, device, train_loader, optimizer, epoch, criterion = criterion))
+    loss_list.extend(train(model, device, train_loader, optimizer, epoch, criterion=criterion))
+    scheduler.step()
+    if epoch in hessian_epochs:
+        compute_and_plot_hessian(epoch)
 
 
 # plot loss list
@@ -186,113 +226,4 @@ plt.plot(loss_list)
 plt.xlabel('Iteration')
 plt.ylabel('Loss')
 plt.savefig(f'figure_mnist/{comment}_loss_T_{n_epochs}.png')
-
-
-
-
-# rewrite the train_data to be a dictionary
-train_data = []
-for batch_idx, (data, target) in enumerate(train_loader):
-    if batch_idx > n_batch_for_hessian-1:
-        break
-    if loss_type == 'CE':
-        train_data.append({'X_train': data.to(device), 'Y_train': target.to(device)})
-    elif loss_type == 'MSE':
-        target_one_hot = F.one_hot(target, num_classes=n_class).float()
-        train_data.append({'X_train': data.to(device), 'Y_train': target_one_hot.to(device)})
-
-hessian = hessian_spectrum.Hessian(model, train_data = train_data, batch_size= 1, use_minibatch = False, gradient_accumulation_steps= 1 , device = 'cpu', comment = comment, loss = criterion)
-
-
-full_hessian = hessian.get_full_hessian()
-full_hessian = np.abs(full_hessian)
-max_value = np.max(full_hessian)
-plt.figure()
-plt.imshow(full_hessian, cmap= cmap, interpolation='nearest', vmax = max_value  / visual_degree_full_hessian , vmin = 0)
-plt.colorbar()
-plt.savefig(f'figure_mnist/{comment}_fullhessian_T_{n_epochs}.png')
-plt.savefig(f'figure_mnist/{comment}_fullhessian_T_{n_epochs}.pdf', bbox_inches='tight')
 plt.close()
-
-
-
-# average over blocks
-    
-rows_A, cols_A = full_hessian.shape
-rows_B, cols_B = rows_A// input_dim, cols_A// input_dim
-# Initialize array B
-B = np.zeros((rows_B, cols_B))
-# Calculate averages using nested loops
-for i in range(rows_B):
-    for j in range(cols_B):
-        # Determine the indices in A for each entry of B
-        row_start, row_end = i * rows_A // rows_B, (i + 1) * rows_A // rows_B
-        col_start, col_end = j * cols_A // cols_B, (j + 1) * cols_A // cols_B
-        
-        # Calculate the average for the specified indices in A
-        average_value = np.mean(full_hessian[row_start:row_end, col_start:col_end])
-        
-        # Assign the average to the corresponding entry in B
-        B[i, j] = average_value
-
-avg_value = np.mean(B)
-med_value = np.median(B)
-max_value = np.max(B)
-min_value = np.min(B)
-
-print(f'avg = {avg_value}, medium = {med_value},  max = {max_value}, min = {min_value}')
-plt.figure()
-ax = sns.heatmap(B, vmin=0, vmax= max_value / 2 , annot=True, annot_kws={"size": 7}, cmap= cmap) # 'viridis'
-
-plt.savefig(f'figure_mnist/{comment}_avg_hessian_T_{n_epochs}.png')
-
-
-## plot principal block hessian
-full_hessian_dic = hessian.get_full_hessian_layer_by_layer()
-for idx, (name, full_hessian) in enumerate(full_hessian_dic.items()):
-    full_hessian = np.abs(full_hessian)
-    max_value = np.max(full_hessian)
-    plt.figure()
-    plt.imshow(full_hessian, cmap=  cmap, interpolation='nearest', vmax = max_value  / visual_degree_block_hessian[idx] , vmin = 0)
-    plt.colorbar()
-    plt.savefig(f'figure_mnist/{comment}_block_hessian_{name}_T_{n_epochs}.png')
-    plt.savefig(f'figure_mnist/{comment}_block_hessian_{name}_T_{n_epochs}.pdf', bbox_inches='tight')
-    plt.close()
-
-    # averaged F norm
-    if 'fc1' in name:
-        block_dim = input_dim
-    elif 'fc2' in name:
-        block_dim = n_class
-    rows_A, cols_A = full_hessian.shape
-    rows_B, cols_B = rows_A// block_dim, cols_A// block_dim
-    # Initialize array B
-    B = np.zeros((rows_B, cols_B))
-    # Calculate averages using nested loops
-    for i in range(rows_B):
-        for j in range(cols_B):
-            # Determine the indices in A for each entry of B
-            row_start, row_end = i * rows_A // rows_B, (i + 1) * rows_A // rows_B
-            col_start, col_end = j * cols_A // cols_B, (j + 1) * cols_A // cols_B
-            
-            # Calculate the average for the specified indices in A
-            average_value = np.mean(full_hessian[row_start:row_end, col_start:col_end])
-            
-            # Assign the average to the corresponding entry in B
-            B[i, j] = average_value
-
-    avg_value = np.mean(B)
-    med_value = np.median(B)
-    max_value = np.max(B)
-    min_value = np.min(B)
-
-    print(f'avg = {avg_value}, medium = {med_value},  max = {max_value}, min = {min_value}')
-    plt.figure()
-    ax = sns.heatmap(B, vmin=0, vmax= max_value / 2 , annot=True, annot_kws={"size": 7}, cmap= cmap)
-
-    plt.savefig(f'figure_mnist/{comment}_avg_hessian_{name}_T_{n_epochs}.png')
-
-
-
-
-
